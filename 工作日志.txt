@@ -1,0 +1,949 @@
+7.19
+
+【学到的新知识】
+- JWT（JSON Web Token）：登录后服务端返回一个加密令牌，后续请求在Header里带
+  Bearer xxx就能识别身份，服务端不存session，无状态架构
+- BCrypt：密码单向加密算法，自带随机盐值，即使数据库泄露也无法反推明文
+- 泛型<T>：方法声明时用<T>表示"类型由调用者决定"，如ApiResponse<T>.success(data)
+  传User进去自动返回ApiResponse<User>，一套代码适配所有类型
+- 分表设计：用户-角色是多对多关系，用sys_user_role中间表桥接，避免字段冗余
+  （一个用户可以有多个角色，加一行数据即可，不用改表结构）
+- @NotBlank注解：Spring Validation提供，自动校验字符串非空，配合@Valid使用
+- 静态工厂方法：ApiResponse.success()不用new，一行代码构建响应对象，Controller里简洁
+
+【设计决策及原因】
+- 选择JWT而非Session：后端无状态，方便水平扩展，适合前后端分离
+- 选择BCrypt而非MD5/SHA：MD5已可彩虹表破解，BCrypt自动加盐，安全性更高
+- 使用统一响应格式ApiResponse：前端只需判断code字段，不用适配每个接口的不同格式
+- 角色模型选"管理员创建用户+支持自行注册"：两种入口兼顾后台管理和开放注册场景
+- 数据库时间字段用DATETIME而非TIMESTAMP：DATETIME范围更大（1000-9999年）
+
+【遇到的问题及解决】
+1. pom.xml加依赖后标红
+   原因：Maven没刷新，IDEA没下载jar包
+   解决：右侧Maven面板 → 点击刷新按钮（圆圈箭头），等待下载完成
+
+2. 新建的文件夹不能创建Java类
+   原因：文件夹建在了src/main/下，不在源码目录src/main/java/...下
+   解决：右键java目录下com.example.user_manage_system包 → 新建 → 软件包 → 输入子包名
+
+3. 包声明和文件路径不匹配（package model; 但文件在com/example/user_manage_system/model/）
+   原因：从错误位置移动文件后，包声明没同步更新
+   解决：包声明必须和文件所在目录路径完全一致
+
+4. JWtUtil.java 类名拼写错误（W大写）
+   原因：手误
+   解决：重命名文件和类名为JwtUtil（t小写），注意大小写敏感
+
+5. error()方法忽略入参code，硬编码为500
+   原因：写代码时手误
+   解决：r.code = code; 使用入参而非硬编码
+
+【明天计划】
+- 完成dto层剩余文件：RegisterRequest、UserCreateRequest、UserUpdateRequest、UserResponse
+- 开始编写model层（User、Role、UserRole含完整字段和getter/setter）
+
+
+============================================================
+7.21（今天）
+
+【学到的新知识 — 重点：JwtUtil】
+
+一、JWT工具类的整体架构
+JwtUtil是一个@Component组件，职责就三个：造令牌、拆令牌、读数据。
+配置文件里写秘钥和过期时间，通过@Value注解注入，不改代码就能调整配置。
+
+二、@Component 干了什么
+Spring启动时扫描到这个注解，自动创建JwtUtil的单例对象存到容器里。
+其他类要用JwtUtil时，不需要new，通过@Autowired或构造器注入就能拿到。
+这就是IoC（控制反转）——对象的创建和管理交给Spring，你只管用。
+
+三、密钥怎么来的
+1. application.properties里写了一串字符串作为秘钥
+2. @Value("${jwt.secret}") 把这串字符串注入到 secret 字段
+3. secret.getBytes() 把字符串转成字节数组
+4. Keys.hmacShaKeyFor() 把字节数组包装成HMAC加密算法能用的密钥对象
+   HMAC（Hash-based Message Authentication Code）是一种用哈希做消息认证的算法，
+   同一个秘钥加密的结果只有同一个秘钥能解开，保证了令牌不能被伪造
+
+四、generateToken — 造令牌
+流程：
+  new Date() 获取当前时间
+  new Date(当前毫秒数 + 86400000) 算出过期时间（24小时后）
+  Jwts.builder() 创建一个构建器
+    .claim("key", value) 往令牌里塞自定义数据（这里塞了userId和role）
+    .issuedAt() 标记签发时间
+    .expiration() 标记过期时间
+    .signWith(key) 用密钥签名（最关键！没签名任何人都能伪造）
+    .compact() 把所有数据+签名打包成一串字符串 → "eyJhbGciOi..."
+最终生成的token分为三段（用.分隔）：头部.载荷.签名，Base64编码
+
+五、parseToken — 拆令牌
+流程：
+  Jwts.parser() 创建解析器
+    .verifyWith(key) 告诉它用哪个密钥验证签名
+    .build() 构建
+    .parseSignedClaims(token) 解析并验证（如果签名不对或过期，直接抛异常）
+    .getPayload() 取出载荷（里面有你塞的所有claim数据）
+返回Claims对象，本质是个Map<String, Object>
+
+六、getUserIdFromToken / getRoleFromToken — 读数据
+parseToken(token).get("userId", Long.class)
+  第二个参数指定返回值类型，jjwt自动帮你做类型转换
+  相当于 Claims.get("userId") 然后转成Long
+
+七、为什么能防伪造
+signWith(key) 会把载荷+头部用秘钥算出一个签名串，附在token末尾。
+如果有人篡改了载荷（比如把userId从1改成2），签名就对不上了，
+parseSignedClaims()会抛出SignatureException。除非黑客知道你的秘钥，
+否则无法生成合法签名，所以秘钥一定要足够长且保密。
+
+八、方法可见性（public vs private）
+generateToken：public，登录时Controller要调用
+parseToken：private，只在JwtUtil内部用，外界不需要关心解包细节
+getUserIdFromToken / getRoleFromToken：public，拦截器要调用
+
+【完成的工作】
+- dto层全部完成：RegisterRequest、UserCreateRequest、UserUpdateRequest、UserResponse
+- PasswordUtil完成：BCrypt加密和校验，修正了硬编码salt和冗余if-else
+- JwtUtil完成：generateToken、parseToken、getUserIdFromToken、getRoleFromToken
+
+【遇到的问题及解决】
+6. BCrypt.hashpw第二个参数写了固定字符串"wangdu"
+   原因：不理解salt的含义，以为随便传个字符串就行
+   解决：应传BCrypt.gensalt()，每次自动生成随机盐值，相同密码每次加密结果不同
+
+7. if(obj) { return true; } else { return false; } 冗余
+   原因：思维惯性
+   解决：直接 return BCrypt.checkpw(...)，方法本身返回boolean
+
+【明天计划】
+- 编写Repository层三个文件（UserRepository、RoleRepository、UserRoleRepository）
+  核心：JdbcTemplate操作数据库，RowMapper映射结果集
+
+
+============================================================
+7.22（今天）
+
+【学到的新知识 — 重点：Repository层 / JdbcTemplate】
+
+一、Repository层是什么
+Repository是专门和数据库打交道的层，只负责执行SQL、返回结果，不包含任何业务逻辑。
+用@Repository标记，Spring自动管理。依赖注入JdbcTemplate来操作数据库。
+
+二、JdbcTemplate — Spring对JDBC的封装
+原生的JDBC需要手动管理Connection、Statement、ResultSet、try-catch-finally，代码冗长。
+JdbcTemplate帮你做掉所有这些，你只管写SQL和参数。
+
+三个核心方法：
+  query(sql, rowMapper, 参数...)   → 查多条，返回List
+  queryForObject(sql, rowMapper, 参数...) → 查单条行
+  queryForObject(sql, Integer.class, 参数...) → 查单个值（如COUNT）
+  update(sql, 参数...)              → 增/删/改，返回影响行数
+
+三、RowMapper — 把数据库行转成Java对象
+数据库返回ResultSet，RowMapper定义映射规则：
+  (rs, rowNum) -> {
+      User user = new User();
+      user.setId(rs.getLong("id"));           // 列名"id" → user.id
+      user.setUsername(rs.getString("username"));
+      ...
+      return user;
+  }
+每查到一行，JdbcTemplate就调用一次RowMapper，传入当前行数据rs和行号rowNum。
+
+注意：列名用数据库的下划线命名（created_at），Java字段用驼峰（createdAt），需要手动对应。
+     时间字段用 rs.getTimestamp("xxx").toLocalDateTime() 转换。
+
+四、RowMapper本质是Lambda表达式
+原始写法是匿名内部类：
+  new RowMapper<User>() {
+      @Override
+      public User mapRow(ResultSet rs, int rowNum) { ... }
+  }
+Lambda把这一大串缩成了 (rs, rowNum) -> { ... }，功能完全相同，省略了样板代码。
+Lambda只适用于接口只有一个抽象方法的情况（叫函数式接口）。
+
+五、PreparedStatement — 预编译防SQL注入
+不用PreparedStatement的危险写法：
+  "SELECT * FROM user WHERE name = '" + input + "'"
+  用户输入 '; DROP TABLE user; -- → 整个表被删掉（SQL注入攻击）
+
+PreparedStatement用?占位 + setXxx()赋值：
+  ps = con.prepareStatement("INSERT INTO user VALUES (?,?)");
+  ps.setString(1, username);  // SQL和值是分开传的，数据库不会把值当SQL执行
+  ps.setString(2, password);
+
+六、KeyHolder — 拿回自增ID
+建表时 id 设置为 AUTO_INCREMENT，插入时不用传id，数据库自动生成。
+但插入后业务代码需要知道这条记录的id（比如分配角色），KeyHolder就是接收盒：
+
+流程：
+  1. con.prepareStatement(SQL, Statement.RETURN_GENERATED_KEYS)
+     — 告诉数据库"执行完把自增ID返给我"
+  2. jdbcTemplate.update(lambda, keyHolder)
+     — Lambda负责填SQL，keyHolder负责收ID
+  3. keyHolder.getKey().longValue()
+     — 取出刚生成的ID值
+
+jdbcTemplate.update()接收两个参数时的Lambda本质：
+  第一个参数是PreparedStatementCreator（函数式接口），Lambda con -> { ... } 就是它的实现。
+  con是数据库连接，在Lambda里用它创建PreparedStatement、填值，最后return ps交回去执行。
+
+七、分页查询
+前端传page（第几页）和size（每页条数），后端算出offset：
+  offset = (page - 1) * size
+
+SQL: LIMIT offset, size
+  page=1,size=10 → LIMIT 0,10  （第1~10条）
+  page=2,size=10 → LIMIT 10,10 （第11~20条）
+
+为什么需要countFiltered配合：分页需要总条数来算一共多少页。
+  countFiltered用 queryForObject(sql, Integer.class, 参数) 查COUNT(*)返回单个整数。
+
+八、query和queryForObject的区别
+  query()      → 查多行，返回List<T>，没查到返回空列表[]
+  queryForObject() → 查单行或单值，返回T，没查到抛EmptyResultDataAccessException
+  查COUNT(*)必须用queryForObject，因为只返回一个数字，不是一行数据。
+
+九、update方法的多态
+JdbcTemplate的update()既能执行INSERT、UPDATE，也能执行DELETE。
+  增：update("INSERT INTO ...", 参数...)
+  改：update("UPDATE ... SET ... WHERE ...", 参数...)
+  删：update("DELETE FROM ... WHERE ...", 参数...)
+
+十、@Repository / @Component / @Service / @Controller 的区别
+功能都一样（让Spring管理这个类的实例），只是语义不同：
+  @Repository  — 数据访问层，Spring额外提供异常转换（把JDBC异常转成Spring的DataAccessException）
+  @Service     — 业务逻辑层
+  @Controller  — 控制器层（接收HTTP请求）
+  @Component   — 通用组件（不属于以上三层的工具类，如JwtUtil）
+
+【完成的工作】
+- RoleRepository：findAll、findById、findByCode
+- UserRoleRepository：insert、findByUserId、deleteByUserId
+- UserRepository：findByUsername、findById、findAll（分页+模糊搜索）、countFiltered、insert（含KeyHolder拿自增ID）、update、deleteById
+
+【遇到的问题及解决】
+8. RoleRepository报错：RowMapper里写了 create_at（缺了d）
+   原因：手误
+   解决：改为 created_at，和数据库列名一致
+
+9. RoleRepository报错：findByRoleCode里SQL写了 code 而非 role_code
+   原因：没核对数据库列名
+   解决：改为 role_code
+
+10. UserRepository自动导入了org.apache.catalina.User而非项目的User类
+    原因：IDEA自动补全时优先推荐了Tomcat内置的同名类
+    解决：手动改import为 com.example.user_manage_system.model.User，不能一味接受IDEA提示
+
+11. UserRepository的RowMapper Lambda缺少return语句
+    原因：Lambda体里创建了user对象、设了值，但忘了return回去
+    解决：Lambda末尾必须 return user;
+
+12. insert方法SQL拼写INSERR
+    原因：手误
+    解决：改为INSERT
+
+13. insert方法结尾多了残留字符 ) } ) 
+    原因：从别处粘贴代码时代码块边界没对齐
+    解决：仔细检查花括号配对
+
+14. countFiltered用了query()而非queryForObject()
+    原因：不知道查单个值和查多行的区别
+    解决：COUNT(*)返回一个整数，必须用 queryForObject(sql, Integer.class, 参数)；
+         query() 是查多行返回List用的
+
+15. findById入参写了String id
+    原因：没注意类型
+    解决：数据库id是BIGINT，Java对应Long
+
+【明天计划】
+- 编写Service层（UserService接口 + UserServiceImpl实现）
+  核心：注册/登录/用户CRUD的业务逻辑，调用Repository完成功能
+
+
+============================================================
+7.23（今天）
+
+【学到的新知识 — 重点：Service层 / 业务逻辑】
+
+一、为什么要有Service层
+Controller层接收请求，Repository层操作数据库，中间还需要一层"编排业务"。
+比如"注册"这个业务，要操作3张表（查重、插用户、分配角色），
+这些逻辑不能放Controller（太臃肿），也不能放Repository（Repository只负责单表操作），
+所以放Service层。
+
+三层各司其职：
+  Controller  → 接收请求、参数校验、返回响应
+  Service     → 业务逻辑、事务控制、组合多个Repository
+  Repository  → 单表的增删改查
+
+二、接口 + 实现类 的分层模式
+UserService是接口（定义方法签名），UserServiceImpl是实现类（写具体逻辑）。
+Controller只依赖接口不依赖实现类，好处：
+  1. 想换实现（如从JDBC换成MyBatis）时，只改实现类，Controller不用动
+  2. 方便测试：可以写个假实现类Mock掉真实数据库
+
+三、构造器注入
+UserServiceImpl的构造器声明需要哪些依赖（3个Repository + JwtUtil），
+Spring启动时自动把这些依赖的实例找出来，new UserServiceImpl(...)时传进去。
+相比@Autowired字段注入，构造器注入的优点是：
+  1. 依赖清晰可见，构造器签名就是依赖清单
+  2. 字段能用final修饰，防止被意外修改
+  3. 测试时手动new就能传入假依赖，不用依赖Spring容器
+
+四、业务校验失败为什么要throw异常而不是return
+register方法校验用户名重复时，用 throw new RuntimeException("用户名已存在")。
+原因：register返回void，如果return，调用方（Controller）不知道是成功还是失败，
+无法给前端返回错误提示。
+抛异常会一路向上冒泡到Controller，Controller捕获后返回友好JSON：
+  {"code":400, "message":"用户名已存在"}
+
+五、密码加密的时机
+注册时 PasswordUtil.encode(明文) → 存密文到数据库。
+登录时 PasswordUtil.matches(明文, 密文) → 校验是否匹配。
+数据库里永远只存密文，即使数据库泄露，黑客也拿不到明文密码。
+
+六、登录校验的安全细节
+login方法的两个校验（用户不存在/密码错误）返回相同的错误信息"用户名或密码错误"，
+目的是不让攻击者通过报错信息判断"这个用户名到底存不存在"，防止撞库/枚举攻击。
+
+七、部分更新（传什么改什么）
+updateUser里每个字段都先判空：
+  if (request.getEmail() != null) user.setEmail(...)
+这样前端传1个字段就改1个，不传的不动。避免把没传的字段覆盖成null。
+
+八、删除的顺序（外键约束）
+deleteUser必须先删 sys_user_role 关联表，再删 sys_user 用户表。
+如果反过来，关联表里会残留"指向不存在用户"的孤儿数据。
+
+九、先删后加更新关联关系
+updateUser里改角色时，先 deleteByUserId 删掉旧角色，再 insert 新角色。
+因为关联表一行代表一个角色，直接insert会变成"同时有两个角色"。
+
+十、User转UserResponse（脱敏）
+toUserResponse方法把User转成UserResponse，关键区别：
+  UserResponse里没有password字段，并且多了roleName（角色名）。
+这就是DTO的作用：不把密码等敏感信息返回给前端，同时补充前端需要的展示字段。
+
+十一、分页返回结构
+listUsers返回 Map：{"list": [...], "total": 123}
+  list  → 当前页的数据
+  total → 匹配的总条数（前端用来算总页数）
+用Map不如专门的PageResult对象类型安全，求职优化阶段会改成泛型分页对象。
+
+【完成的工作】
+- UserService接口：定义7个方法（login、register、createUser、updateUser、deleteUser、listUsers、getUserById）
+- UserServiceImpl实现类：7个方法全部实现
+- UserResponse补充了getter/setter
+- UserUpdateRequest修正：删除password字段（密码单独改）、status改Integer、roleId改Long
+- UserCreateRequest修正：roleId从String改Long
+- 编译通过 mvnw.cmd compile
+
+【遇到的问题及解决】
+16. login方法里写 JwtUtil.generateToken(...) 报错
+    原因：generateToken是实例方法（非static），不能类名调用；且jwtUtil字段没声明注入
+    解决：注入JwtUtil（构造器加参数），用 jwtUtil.generateToken(...) 调用；
+         第二个参数传role.getRoleCode()而非role对象
+
+17. login里 user.status 直接访问字段
+    原因：model字段之前声明为public
+    解决：应统一用getter user.getStatus()（封装原则，model字段应改为private）
+
+18. UserCreateRequest的roleId是String
+    原因：没注意角色id在数据库是BIGINT数字
+    解决：改为Long类型
+
+19. updateUser里 insert(user.getId(), user.getId()) 第二个参数写错
+    原因：复制粘贴没改全
+    解决：第二个参数应为 userUpdateRequest.getRoleId()
+
+20. createUser默认角色写1（管理员）
+    原因：没意识到1是admin角色
+    解决：改为2（普通用户），管理员建用户默认给普通角色，防止误造管理员
+
+21. listUsers缺 import java.util.Map
+    原因：用了Map但没导入
+    解决：补 import java.util.Map
+
+22. UserServiceImpl接口实现类缺@Service注解
+    原因：以为implements就自动注册
+    解决：加@Service，Spring才扫描注册这个bean
+
+【明天计划】
+- 编写Controller层（AuthController + UserController）
+  核心：接收HTTP请求、参数校验、调用Service、返回ApiResponse
+- 编写WebConfig（CORS跨域 + 登录拦截器）
+- 用Postman测试完整的登录注册流程
+
+
+============================================================
+7.24（今天）
+
+【学到的新知识 — 重点：Controller层】
+
+一、Controller是什么
+Controller是三层架构最外层，负责接收HTTP请求、调用Service、返回响应。
+用@RestController标记（= @Controller + @ResponseBody），方法返回值自动转JSON。
+
+二、常用注解及其含义
+  @RestController        → 标记控制器，返回JSON而非页面
+  @RequestMapping("/api/users") → 类级别路径前缀
+  @GetMapping            → 处理GET请求（查询）
+  @PostMapping           → 处理POST请求（新增）
+  @PutMapping("/{id}")   → 处理PUT请求（修改），{id}是路径变量
+  @DeleteMapping("/{id}")→ 处理DELETE请求（删除）
+  @RequestBody           → 把请求体JSON自动转成Java对象
+  @PathVariable          → 取URL路径里的{id}值
+  @RequestParam(defaultValue="1") → 取URL查询参数?page=1，可设默认值
+
+三、RESTful设计规范
+用HTTP方法表达"动作"，URL只表达"资源"：
+  GET    /api/users/5  → 查5号用户
+  PUT    /api/users/5  → 改5号用户
+  DELETE /api/users/5  → 删5号用户
+反面教材：POST /api/users/getUser（把动词塞进URL，不推荐）
+
+四、JSON序列化
+Controller返回Java对象，Spring用Jackson库自动转成JSON字符串。
+  ApiResponse{code=200, message="success", data=xxx}
+  → {"code":200, "message":"success", "data":xxx}
+前端收到JSON，用JS直接取 .code .data 即可。
+
+五、Void和void的区别
+泛型ApiResponse<T>的T必须是类型，不能写void，所以用包装类型Void。
+  void = 关键字，表示"无返回值"，不能作泛型参数
+  Void = 类（首字母大写），可作泛型参数
+注册方法无数据返回，用ApiResponse<Void> + success(null)表示"没数据"。
+
+【完成的工作】
+- AuthController：register、login两个接口
+- UserController：list、getById、create、update、delete五个接口
+- 编译通过
+
+【遇到的问题及解决】
+23. login接口返回类型写成ApiResponse<Void>，丢弃了token
+    原因：没意识到登录必须把token返回给前端
+    解决：改为ApiResponse<String>，接收token并返回 success(token)
+
+24. /loogin 拼写错误（多了个o）
+    原因：手误
+    解决：改为 /login
+
+25. import UserService 重复
+    原因：IDEA自动导入时重复
+    解决：删掉重复的一行
+
+【明天计划】
+- 编写WebConfig（CORS跨域 + 登录拦截器）
+- 启动项目，测试注册/登录/查列表
+
+
+============================================================
+7.25（今天）
+
+【学到的新知识 — 重点：拦截器 & CORS & 测试】
+
+一、拦截器（HandlerInterceptor）的作用
+拦截器在请求到达Controller之前执行，用于身份校验。
+核心方法preHandle：
+  return true  → 放行，继续走Controller
+  return false → 拦截，直接返回响应（如401）
+
+流程：
+  请求进来 → preHandle校验token → 合法？放行 : 返回401
+
+二、请求头Authorization
+HTTP请求除URL、请求体外，还带一堆"键:值"的附加信息叫请求头。
+  Authorization: Bearer eyJhbGciOi...
+前端登录后每次请求都带上这个头，后端靠它识别身份。
+  request.getHeader("Authorization") 取出它的值。
+
+三、Token的传递与解析
+  authHeader.startsWith("Bearer ") → 判断格式是否正确
+  authHeader.substring(7) → 切掉"Bearer "前缀（7个字符，含空格），留下纯token
+  jwtUtil.getUserIdFromToken(token) → 解析出userId
+  request.setAttribute("userId", userId) → 暂存到request，供Controller用@RequestAttribute取
+
+四、&& 和 || 的经典错误
+判断"header为null或不是Bearer开头"应该用||：
+  if (authHeader == null || !authHeader.startsWith("Bearer "))  ✓
+误写成&&会导致条件永远不成立，token为空也能混进来：
+  if (authHeader == null && authHeader.startsWith("Bearer "))  ✗（永远false）
+
+五、CORS跨域
+浏览器同源策略：协议+域名+端口三者相同才允许请求，否则跨域拦截。
+前后端分离时（前端3000端口、后端8080端口）必然跨域，需后端声明放行。
+  registry.addMapping("/**").allowedOriginPatterns("*")  → 允许所有来源
+注意：allowedOrigins("*") 和 allowCredentials(true) 不能同时用，
+     要用 allowedOriginPatterns("*") 替代。
+
+六、拦截器注册
+  addInterceptor(拦截器)                    → 注册哪个拦截器
+  .addPathPatterns("/api/**")               → 拦截哪些路径
+  .excludePathPatterns("/api/auth/login",...) → 放行哪些路径（登录注册必须放行）
+
+七、测试流程
+1. 注册 POST /api/auth/register（Body传JSON）
+2. 登录 POST /api/auth/login → 返回token
+3. 带token访问 GET /api/users（Header: Authorization = Bearer token）
+
+八、浏览器和Postman的区别
+浏览器地址栏只能发GET请求，POST接口必须用API测试工具（Postman/Apifox）。
+浏览器直接访问POST接口 → 405错误。
+
+九、token的作用
+token是身份凭证（类似员工工牌）：
+  登录 → 服务端发token（加密存着userId和role）
+  带token访问 → 拦截器解析token → 知道你是谁、什么角色
+  无token访问 → 拦截器返回401，请求到不了Controller
+Token里的role字段是将来做权限判断的基础。
+
+【完成的工作】
+- AuthInterceptor：拦截器，校验token、解析身份、存request
+- WebConfig：CORS跨域配置 + 拦截器注册
+- 编译通过，成功启动项目
+- 完整测试通过：注册→登录→带token查列表
+
+【遇到的问题及解决】
+26. 拦截器条件判断用&&而非||
+    原因：逻辑思维混乱，&&和||混淆
+    解决：改为||，"null或不是Bearer开头"才拦截
+
+27. AuthInterceptor缺@Component
+    原因：忘了加注解，Spring不会扫描注册
+    解决：加@Component
+
+28. WebConfig方法名adddCorsMappings拼错
+    原因：手误多打一个d
+    解决：@Override会报错提醒，改为addCorsMappings
+
+29. 启动报错 Public Key Retrieval is not allowed
+    原因：MySQL8的caching_sha2_password认证，默认禁止公钥检索
+    解决：JDBC URL加参数 allowPublicKeyRetrieval=true
+
+30. 启动报错 Access denied for user 'root'
+    原因：application.properties里root密码写错（写成了root）
+    解决：改为真实密码
+
+31. 启动报错 Port 8080 was already in use
+    原因：上次启动的进程没关，端口被占用
+    解决：查进程ID（Get-NetTCPConnection -LocalPort 8080）然后Stop-Process杀掉；
+         或养成用完在IDEA点红色方块停项目的习惯
+
+32. 中文乱码（roleName显示???）
+    原因：数据库字符集不是utf8mb4，默认latin1不认识中文
+    解决：ALTER DATABASE/TABLE 改成utf8mb4，TRUNCATE角色表后重新插入
+
+33. 注册返回500
+    原因：重复注册同名用户（zhangsan），触发"用户名已存在"异常，无全局异常处理所以500
+    解决：换新用户名注册；这也暴露了需要全局异常处理的优化点
+
+34. 带token访问报错
+    原因：Header写 BearereyJhbGci...（Bearer和token之间少了空格）
+    解决：Bearer后加空格，因为substring(7)依赖这个空格位置
+
+【明天计划】
+- 进入求职优化阶段：
+  1. 全局异常处理（RuntimeException统一捕获返回友好JSON）
+  2. 日志SLF4J
+  3. Swagger接口文档
+  4. 分页结果封装PageResult
+  5. 状态码枚举
+
+
+============================================================
+7.26（今天）
+
+【学到的新知识 — 重点：全局异常处理 & Git]
+
+一、全局异常处理的必要性
+Service层抛异常，如果没人接住，Spring直接返回500错误页。
+前端只能看到"服务器错误"，无法知道具体原因（用户名已存在？密码错？）。
+全局异常处理器把所有异常统一转成友好的JSON返回。
+
+二、@RestControllerAdvice + @ExceptionHandler
+@RestControllerAdvice = @ControllerAdvice + @ResponseBody
+  作用：全局异常处理中心，拦截所有Controller抛出的异常，返回值转JSON。
+@ExceptionHandler(异常类.class)
+  作用：指定处理哪种异常，括号里的异常类就是"挂号窗口"。
+
+匹配机制：
+  Controller抛BusinessException → 找@ExceptionHandler(BusinessException.class) → 返回400
+  Controller抛其他异常 → 找@ExceptionHandler(Exception.class) → 返回500
+顺序很重要：具体的放前面，宽泛的(Exception.class)放后面兜底。
+
+三、业务异常与系统异常分离
+自定义BusinessException继承RuntimeException，区分两类错误：
+  业务错误（用户名已存在）→ 400，信息明确
+  系统错误（数据库崩溃）→ 500，通用提示
+这样前端能区分"是用户操作有问题"还是"服务器出故障"。
+
+四、super() 调用父类构造方法
+public BusinessException(String message) { super(message); }
+super(message) = 调用父类RuntimeException的构造方法，把错误信息存进父类的字段。
+之后 e.getMessage() 能取出来。不调super，错误信息就丢了，getMessage()返回null。
+
+五、RuntimeException是什么
+不是接口，是一个类（异常类）。属于"运行时异常"（免检查异常）：
+  - 不需要强制try-catch，也不需要throws声明
+  - 编译期不检查，运行时才暴露
+继承RuntimeException的好处：抛BusinessException时不需要在每个方法写throws。
+
+六、Git基础操作
+  git init              → 初始化仓库（把当前目录变成git仓库）
+  git add .             → 把所有改动加入暂存区
+  git commit -m "信息"  → 提交（记录一个快照）
+  git remote add origin 地址 → 关联远程仓库
+  git branch -M main    → 分支改名（master改main）
+  git push -u origin main → 推送到远程
+以后每次改代码：git add . → git commit -m "..." → git push
+
+七、Git换行符警告
+LF will be replaced by CRLF —— 这是警告不是错误。
+LF是Linux换行符，CRLF是Windows换行符，Git自动转换，不影响使用，无需处理。
+
+【完成的工作】
+- 新建BusinessException（业务异常类）
+- 新建GlobalExceptionHandler（全局异常处理器）
+- Service层8处RuntimeException改为BusinessException
+- 编译通过
+- 项目上传到GitHub私有仓库 https://github.com/www4811/User_Manage_System
+
+【遇到的问题及解决】
+35. exception包建在了src/main/java/exception下（少了com.example.user_manage_system）
+    原因：又犯了和之前一样的路径错误
+    解决：移到com.example.user_manage_system.exception下，包声明同步修改
+
+36. @ExceptionHandler没写括号里的异常类型
+    原因：以为@ExceptionHandler可以自动推断
+    解决：必须写@ExceptionHandler(BusinessException.class)，否则Spring不知道处理哪种异常
+
+37. 文件名GlobalExceptionhandler大小写不规范
+    原因：Handler的H没大写
+    解决：改为GlobalExceptionHandler
+
+38. 【大坑】在桌面(Desktop)目录误执行git init和git commit
+    原因：终端工作目录是桌面，不是项目目录
+    结果：把整个桌面122个文件（游戏快捷方式、学校文档、PPT、视频、个人信息）全提交了，
+          而Java项目一个文件都没提交进去
+    解决：删除桌面上的.git文件夹（Remove-Item -Recurse -Force .git），
+          然后在正确项目目录重新git init + commit
+    教训：执行git命令前，一定要先确认当前目录对不对（pwd查看），
+          在IDEA的Terminal操作最安全，自动定位项目目录
+
+39. Git凭据授权后显示Authentication Succeeded
+    含义：GitHub登录授权成功，可以关掉浏览器窗口回到应用
+
+【明天计划】
+- 继续求职优化：
+  1. 参数校验完善（Controller加@Valid + 处理MethodArgumentNotValidException）
+  2. 日志SLF4J
+  3. Swagger接口文档
+  4. 分页结果封装PageResult
+  5. 状态码枚举
+
+
+============================================================
+7.27（今天）
+
+【学到的新知识 — 重点：求职优化4项】
+
+一、参数校验（@Valid + @NotBlank + 异常处理）
+DTO字段上的@NotBlank只是"标记"，必须配合@Valid才生效：
+  @Valid  = 开关（安排检查员执行校验）
+  @NotBlank = 规则（字段上的"必填"标签）
+  MethodArgumentNotValidException = 校验失败时Spring抛的异常
+三者缺一不可。
+校验失败时，用 e.getBindingResult().getAllErrors().get(0).getDefaultMessage()
+取出注解里写的message（如"用户名不能为空"），返回友好JSON。
+
+二、分页封装 PageResult<T>（泛型类替代Map）
+用Map返回分页数据的缺点：
+  1. 类型不安全：值都是Object，取出来要强转
+  2. key是字符串，拼错（"list"写成"List"）编译不报错，运行才暴露
+  3. 可读性差：data.get("list") 不知道是什么
+用泛型类PageResult<T>的好处：
+  1. 类型安全：getList()直接返回List<UserResponse>，编译期检查
+  2. 方法名写错编译报错
+  3. 一个类到处复用
+核心思想：能用强类型就用强类型，别用弱类型Map/字符串。
+
+三、日志 SLF4J
+每个类一个Logger：LoggerFactory.getLogger(类名.class)
+日志级别从高到低：error > warn > info > debug
+  log.error("系统异常", e)  → 记录完整异常堆栈（重点排查）
+  log.warn("业务异常：{}", msg) → 只记错误信息，不打印堆栈
+  log.info("用户登录：{}", name) → 记录正常操作轨迹
+用{}占位符代替字符串拼接，效率更高。
+关键区别：warn只记信息，error记录堆栈（含出错行号）。
+
+四、状态码枚举 ResultCode
+魔法数字（400、500）散落在代码里，难维护、易写错。
+用枚举定义：SUCCESS(200)、BAD_REQUEST(400)、UNAUTHORIZED(401)、SERVER_ERROR(500)
+好处：
+  1. 语义清晰：BAD_REQUEST 比 400 好懂
+  2. 编译期检查：枚举名写错编译报错，数字写错不报错
+  3. 集中管理
+枚举语法注意：常量之间用逗号分隔，最后一个用分号。
+
+五、enum枚举是什么
+枚举是特殊类，定义一组固定常量。类似"下拉框"，变量只能取枚举里定义的值之一。
+对比普通int常量：int能传任意数字，枚举类型受限，编译期就能防止非法值。
+
+六、super()调用父类构造
+BusinessException(String message){ super(message); }
+super()是调用父类构造方法。RuntimeException内部有字段存错误信息，
+super(message)把信息存进父类字段，之后e.getMessage()才能取出来。
+
+【完成的工作】
+- 4个Controller方法加@Valid（register、login、create、update）
+- 全局异常处理器加MethodArgumentNotValidException处理
+- 新建PageResult<T>泛型分页类，替换Map（接口、实现、Controller三处同步改）
+- UserServiceImpl加SLF4J日志（登录/注册/创建/删除）
+- 全局异常处理器加日志（业务异常warn、系统异常error）
+- 新建ResultCode枚举，替换魔法数字
+- 编译通过，提交推送到GitHub
+
+【遇到的问题及解决】
+40. PageResult未创建导致报错
+    原因：改了接口返回类型为PageResult，但PageResult类还没建
+    解决：新建PageResult类；改接口类型时，实现类和Controller的返回类型也要同步改
+
+41. 枚举常量用分号分隔报错
+    原因：不知道枚举语法
+    解决：枚举常量之间用逗号，最后一个才用分号
+        SUCCESS(200), BAD_REQUEST(400), SERVER_ERROR(500);
+
+42. RessultCode拼写错误（多打一个s）
+    原因：手误
+    解决：改为ResultCode
+
+43. ApiResponse跨包引用ResultCode没import
+    原因：ResultCode在common包，ApiResponse在dto包
+    解决：加 import com.example.user_manage_system.common.ResultCode;
+
+44. user.status直接访问字段
+    原因：model字段之前声明为public
+    解决：改用getter user.getStatus()
+
+45. 日志语句结尾多分号 log.info(...);;
+    原因：手误
+    解决：去掉多余分号
+
+【明天计划】
+- Swagger接口文档（最后一项优化）
+- 之后可考虑：README文档、单元测试、接口权限细化（admin才能删用户）
+
+
+============================================================
+7.28（今天）
+
+【学到的新知识 — 重点：Swagger & 权限控制 & 修改密码]
+
+一、Swagger接口文档
+springdoc-openapi自动生成接口文档网页，访问 /swagger-ui/index.html。
+它只扫描Controller代码，不碰数据库，不写前端（UI是依赖包自带的）。
+注意版本匹配：Spring Boot 4 要用 springdoc 3.x，Spring Boot 3 用 2.x。
+  springdoc-openapi-starter-webmvc-ui 3.1.0（Spring Boot 4用）
+  版本不匹配会导致启动报错。
+
+二、权限控制
+拦截器解析token后，把userId和role存进request，Controller用@RequestAttribute取出判断。
+权限规则：
+  列表/新增/删除 → 只有admin
+  详情/修改 → admin 或 本人
+判断逻辑：!"admin".equals(role) && !id.equals(userId)
+
+三、字符串比较必须用equals（重要！）
+  role == "admin"      → 错！比较的是内存地址，不是内容
+  "admin".equals(role) → 对！比较内容
+运行时从request取出的字符串和代码里的"admin"不是同一个对象，用==永远不对，
+会导致所有请求都被误判为"无权"。
+
+四、&& 和 || 的区别
+  "不是admin 且 不是自己" → 用 &&（两个条件都满足才拒绝）
+  "null 或 不是Bearer开头" → 用 ||（满足任意一个就拒绝）
+
+五、修改密码 vs 找回密码（重要设计思路）
+修改密码：已登录状态，验证"旧密码"即可（token已证明身份，旧密码防token被盗）
+找回密码：未登录状态（忘了密码），才需要密保问题/邮箱验证码/手机验证码
+这是两个不同场景、不同接口，不要混淆。
+
+六、@PutMapping 的路径变量 {}
+  @PutMapping("/{id}/password") → {id}是占位符，匹配任意值，用@PathVariable取出
+  @PutMapping("/password")      → 固定路径，只能匹配password字面量
+修改密码要指定"改谁"，所以必须带{id}。
+
+七、@PutMapping 括号
+  @PutMapping("/{id}/password")  带括号 = 指定路径
+  @PutMapping                    不带括号 = 用类上的@RequestMapping路径
+只传一个值时可省略 value=，即 @PutMapping("/x") 等价于 @PutMapping(value="/x")。
+
+【完成的工作】
+- pom.xml加springdoc 3.1.0依赖
+- 新建SwaggerConfig（标题/描述/版本/联系人）
+- UserController五个方法全部加权限判断
+- model三个类字段全部public改private，删无用import
+- 开始编写修改密码接口（DTO、Repository、Service、Controller）
+
+【遇到的问题及解决】
+46. Swagger版本选择：Spring Boot 4.1.0很新，2.x不支持
+    原因：springdoc 2.x只支持Spring Boot 3
+    解决：查Maven元数据确认，用springdoc 3.1.0
+
+47. 权限判断用 role != "admin"（字符串用!=比较）
+    原因：误以为Java字符串能用==比较
+    解决：改 "admin".equals(role)，这是最重要的坑，==比较的是地址
+
+48. 权限逻辑 userId != id || role != "admin" 用||
+    原因：逻辑混乱
+    解决：改&&，因为"不是admin且不是自己"才拒绝
+
+49. 修改密码Repository的SQL没有WHERE条件
+    原因：写UPDATE时忘了WHERE id=?
+    后果：会把整张表所有用户密码都改掉（严重事故！）
+    解决：UPDATE ... WHERE id=?，且要用newPassword参数而非旧密码
+
+50. Controller两个方法都用了@PutMapping("/{id}")导致路径冲突
+    原因：update和updatePassword用了相同路径+相同HTTP方法
+    后果：Spring启动报Ambiguous mapping，项目起不来
+    解决：修改密码改用 @PutMapping("/{id}/password")
+
+【明天计划】
+- 完成修改密码接口（修复两个bug后测试）
+- README.md项目文档
+- 单元测试
+- Docker部署
+- Redis缓存
+
+
+============================================================
+7.29（今天）
+
+【学到的新知识 — 重点：Redis缓存 & Docker部署】
+
+一、Redis 和 MySQL 的本质区别
+  MySQL：关系型数据库，要建库建表，数据有结构，存磁盘
+  Redis：键值存储（内存缓存），无表结构，key-value随便存，存内存所以快
+  连接Redis只需host和port，不需要建库建表，本地开发通常免密
+
+二、中间件的两种接入方式
+  1. 注解驱动型 → 需要 @EnableXxx 开关：
+     @EnableCaching（缓存）、@EnableScheduling（定时）、@EnableAsync（异步）
+     共同点：靠注解标记"哪个方法要缓存/定时"，需要开关激活扫描
+  2. 工具型 → 加依赖就能用：
+     MySQL/JdbcTemplate、RedisTemplate
+  判断规律："注解驱动"的功能需要@Enable开关，"加依赖直接用"的不需要
+
+三、Spring Cache 注解（注解版缓存）
+  @Cacheable(value="名称", key="键") → 有缓存就返回，没有就执行并缓存
+  @CacheEvict(value="名称", allEntries=true) → 清除缓存
+  @EnableCaching → 缓存总开关（加在启动类）
+  key写法：#page + ':' + #size，用#取方法参数值拼接
+
+四、序列化 vs 反序列化
+  序列化：对象 → JSON（存Redis时）
+  反序列化：JSON → 对象（读Redis时）
+  反序列化必须知道"目标类型"，否则JSON只能还原成通用Map
+
+五、Spring Data Redis 4.0 的序列化类变更（重要！）
+  旧类 GenericJackson2JsonRedisSerializer（已弃用）
+  新类 GenericJacksonJsonRedisSerializer（少了中间的2）
+  而且新类的无参构造被移除，必须用builder方式创建并启用类型信息：
+    GenericJacksonJsonRedisSerializer.builder()
+        .enableDefaultTyping(...)  // 在JSON里嵌入@class类型信息
+        .build()
+  直接 new GenericJacksonJsonRedisSerializer(objectMapper) 不启用类型信息，
+  会导致反序列化时类型丢失。
+
+六、Jackson 3 的包名变化
+  Spring Boot 4 用 Jackson 3，包名从 com.fasterxml 变成 tools.jackson：
+    tools.jackson.databind.ObjectMapper
+    tools.jackson.databind.jsontype.BasicPolymorphicTypeValidator
+
+七、缓存反序列化的经典坑（LinkedHashMap问题）
+  报错：LinkedHashMap cannot be cast to ApiResponse
+  原因：JSON序列化时没记录类型信息，反序列化时Jackson不知道原类型，
+        只能还原成LinkedHashMap，强转ApiResponse失败
+  解决：启用 enableDefaultTyping，让JSON里带@class字段
+
+八、缓存一致性
+  数据增删改后，缓存里的旧数据必须失效，否则查询返回过期数据。
+  用 @CacheEvict(allEntries=true) 在增删改方法上清空缓存。
+
+九、Docker 是什么
+  Docker打包应用+环境成"集装箱"，任何装了Docker的机器一条命令跑起来，
+  解决"我电脑能跑你电脑跑不了"的环境一致性问题。
+
+十、Docker 三件套
+  Dockerfile         → 打包Java应用成镜像（FROM基础镜像/COPY jar/ENTRYPOINT启动）
+  docker-compose.yml → 编排多个容器（mysql/redis/app三个一起启动）
+  init.sql           → MySQL首次启动自动建表插数据
+
+十一、Docker 常见网络坑（国内环境）
+  1. 拉镜像失败 "dialing registry-1.docker.io:443" → Docker Hub被墙
+     解决：配置国内镜像加速器 registry-mirrors
+  2. 拉取中断 "short read ... unexpected EOF" → 网络不稳定
+     解决：重试，断点续传；或单独docker pull一个个拉
+  3. 端口冲突 "ports are not available ... 3306" → 本机服务占用端口
+     解决：停掉本机MySQL/Redis服务，让容器独占端口
+
+十二、Docker 常用命令
+  docker compose up -d --build → 构建并后台启动所有容器
+  docker compose ps            → 查看容器状态
+  docker compose down          → 停止并删除容器
+  docker pull 镜像名            → 单独拉取镜像
+
+十三、PowerShell 停服务
+  net stop 服务名 在PowerShell里不可用（是cmd命令）
+  要用 PowerShell 原生：Stop-Service -Name "服务名" -Force
+  先查服务：Get-Service | Where-Object {$_.Name -like "*mysql*"}
+
+【完成的工作】
+- Redis缓存注解版五步全部完成（依赖/配置/@EnableCaching/序列化/注解）
+- 解决GenericJackson2JsonRedisSerializer弃用问题
+- 解决缓存反序列化LinkedHashMap类型丢失问题
+- 安装Docker Desktop（WSL2后端）
+- 编写Dockerfile、docker-compose.yml、init.sql
+- 配置国内镜像加速器，成功拉取mysql和redis镜像
+- 停掉本机MySQL80和Redis服务解决端口冲突
+
+【遇到的问题及解决】
+51. GenericJackson2JsonRedisSerializer弃用
+    原因：Spring Data Redis 4.0移除了带2的旧类
+    解决：换GenericJacksonJsonRedisSerializer（少个2）
+
+52. GenericJacksonJsonRedisSerializer无参构造报错
+    原因：4.x要求显式传ObjectMapper
+    解决：先传ObjectMapper，后改用builder方式
+
+53. 【核心坑】LinkedHashMap cannot be cast to ApiResponse
+    原因：JSON序列化没记录类型信息，反序列化丢失类型
+    解决：builder().enableDefaultTyping(...)启用@class类型信息
+
+54. Jackson 3包名变化
+    原因：Spring Boot 4用Jackson 3，包名tools.jackson而非com.fasterxml
+    解决：import tools.jackson.databind.ObjectMapper等
+
+55. Docker拉镜像失败 registry-1.docker.io:443超时
+    原因：Docker Hub在国内被墙
+    解决：Docker Desktop设置里加registry-mirrors国内镜像源
+
+56. Docker拉镜像中断 short read unexpected EOF
+    原因：国内镜像源不稳定，下载大文件中断
+    解决：重试断点续传，或单独docker pull
+
+57. Docker端口冲突 3306被占用
+    原因：本机MySQL80服务还在运行
+    解决：Stop-Service停掉MySQL80和Redis服务
+
+58. net stop命令在PowerShell不可用
+    原因：net是cmd命令，PowerShell不识别
+    解决：用Stop-Service -Name -Force
+
+【明天计划】
+- 完成Docker部署验证（docker compose up -d启动三容器）
+- 测试Docker环境下应用正常运行
+- 提交代码到GitHub
