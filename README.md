@@ -69,18 +69,27 @@ INSERT INTO sys_role (role_name, role_code, description) VALUES
 
 ### 2. 修改配置
 
-编辑 `src/main/resources/application.properties`，改成你自己的数据库账号密码：
+项目使用**环境变量**管理敏感信息，`application.properties` 里不含明文密码。
+
+新建 `src/main/resources/application-local.properties`（此文件已被 .gitignore 忽略，不会提交）：
 
 ```properties
-spring.datasource.username=你的用户名
-spring.datasource.password=你的密码
+spring.datasource.password=你的数据库密码
 jwt.secret=换成你自己的密钥
 ```
+
+然后以 `local` profile 启动：
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=local
+```
+
+或在 IDEA 启动配置的 Program arguments 加：`--spring.profiles.active=local`
 
 ### 3. 启动项目
 
 ```bash
-./mvnw spring-boot:run
+./mvnw spring-boot:run -Dspring-boot.run.profiles=local
 ```
 
 ### 4. 访问接口文档
@@ -140,3 +149,35 @@ src/main/java/com/example/user_manage_system/
 ```
 Authorization: Bearer <token>
 ```
+
+## Docker 部署
+
+项目提供 Docker 部署方案，一条命令启动 MySQL + Redis + 应用三个容器：
+
+```bash
+# 1. 打包 jar
+./mvnw package
+
+# 2. 构建并启动所有容器
+docker compose up -d --build
+
+# 3. 查看状态
+docker compose ps
+
+# 4. 停止
+docker compose down
+```
+
+注意：Docker 部署前需确保本机 3306（MySQL）和 6379（Redis）端口未被占用。
+
+## 技术要点
+
+- 分层架构：Controller / Service / Repository 三层分离
+- 认证：JWT 无状态认证 + 拦截器校验
+- 密码安全：BCrypt 加密存储
+- 权限：基于角色（admin / user）的接口权限控制
+- 缓存：Redis + Spring Cache 注解缓存
+- 异常处理：全局异常处理器 + 统一响应格式
+- 参数校验：Bean Validation（@Valid + @NotBlank）
+- 文档：springdoc-openapi 自动生成 Swagger 文档
+- 敏感信息：环境变量管理，不入库
